@@ -141,14 +141,11 @@ dist/linux-armv7hf/
 
 Скрипт `platform/linux/api/makedrv.sh` поддерживает несколько целей, включая:
 
+- `cyntron SA-02m` - целевая платформа этого драйвера, собирается через цель `linux-armv7hf`
 - `linux-x86`
 - `linux-x64`
 - `linux-armv7hf`
 - `linux-armv8`
-- `kvantor`
-- `oni-plc-w`
-- `wirenboard6`
-- `wirenboard7`
 - другие специализированные цели из SDK
 
 Для просмотра полного списка:
