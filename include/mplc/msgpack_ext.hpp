@@ -1,0 +1,12 @@
+#pragma once
+#include <msgpack.hpp>
+#include "msgpack/pack_base.hpp"
+#include "msgpack/pack_enum.hpp"
+#include "msgpack/pack_filetime.hpp"
+#include "msgpack/pack_opcua_variant.hpp"
+#include "msgpack/pack_string_view.hpp"
+#include "msgpack/pack_unordered_map.hpp"
+#include "msgpack/pack_ref_to.hpp"
+#include "msgpack/pack_datetime.hpp"
+#include "msgpack/pack_timespan.hpp"
+#include "msgpack/dump.h"

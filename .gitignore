@@ -1,0 +1,7 @@
+.obj/
+dist/
+platform/linux/api/out/
+platform/linux/api/mplc_lib_so/
+platform/linux/api/log.txt
+platform/linux/api/*.so
+platform/linux/api/*.map
