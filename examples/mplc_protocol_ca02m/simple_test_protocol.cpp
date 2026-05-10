@@ -88,11 +88,18 @@ SimpleTestProtocol::~SimpleTestProtocol() {
 
 void SimpleTestProtocol::Init() {
     emulator->init();
-    mask = 0xFF;
-    system("i2cset -y 2 0x41 0x03 0x00");
+    last_mask = cyntron_ca02m::kAllOffMask;
+    outputs_initialized = false;
 }
 
 void SimpleTestProtocol::Execute() {
+    bool blue_led = false;
+    bool red_led = false;
+    bool buzzer = false;
+    bool dout = false;
+    bool usb_power = true;
+    bool have_outputs = false;
+
     // Кэшируем результаты для связанных команд
     static std::string cpu_temp_cache;
     static std::string cpu_load_cache;
@@ -278,30 +285,44 @@ void SimpleTestProtocol::Execute() {
             std::string buff;
             ch->OutVar->Read(LuaProvider());
             ch->OutVar->Value.GetString(buff);
+            const bool enabled = (buff == "true");
+            have_outputs = true;
 
             if (ch->OutVar->m_var->project_path() == "BLUE_LED") {
-                if (buff == "true") mask &= ~(1 << 3);
-                else mask |= (1 << 3);
+                blue_led = enabled;
             }
             else if (ch->OutVar->m_var->project_path() == "RED_LED") {
-                if (buff == "true") mask &= ~(1 << 0);
-                else mask |= (1 << 0);
+                red_led = enabled;
             }
             else if (ch->OutVar->m_var->project_path() == "BUZZER") {
-                if (buff == "true") mask &= ~(1 << 2);
-                else mask |= (1 << 2);
+                buzzer = enabled;
             }
             else if (ch->OutVar->m_var->project_path() == "USB_POWER") {
-                system(buff == "true" ? "gpioset 0 268=0" : "gpioset 0 268=1");
+                usb_power = enabled;
             }
             else if (ch->OutVar->m_var->project_path() == "DOUT") {
-                if (buff == "true") mask &= ~(1 << 1);
-                else mask |= (1 << 1);
+                dout = enabled;
             }
-
-            std::string cmd = "i2cset -y 2 0x41 0x01 " + std::to_string(mask);
-            system(cmd.c_str());
         }
+    }
+
+    if (!have_outputs) {
+        return;
+    }
+
+    const uint8_t new_mask = cyntron_ca02m::build_output_mask(blue_led, red_led, buzzer, dout);
+
+    try {
+        if (!outputs_initialized || new_mask != last_mask) {
+            pca9536_.writeOutputs(new_mask);
+            last_mask = new_mask;
+            outputs_initialized = true;
+        }
+        usb_power_.setEnabled(usb_power);
+        SetFaultState(false, "");
+    } catch (const std::exception& ex) {
+        outputs_initialized = false;
+        SetFaultState(true, ex.what());
     }
 }
 
