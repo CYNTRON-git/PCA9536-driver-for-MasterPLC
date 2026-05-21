@@ -17,6 +17,10 @@ public:
     uint8_t  prio{FMB_PRIO_HIGH};       // event priority to configure on slave
     bool     prio_synced{false};        // whether 0x18 has been sent for this channel
 
+    // True if this channel should produce Fast Modbus events (prio != DISABLED).
+    // DISABLED channels are always polled via fallback RTU read.
+    bool is_event_enabled() const { return prio != FMB_PRIO_DISABLED; }
+
     FmbEventFilter filter;
 
     // Called by FastModbusDeviceModule::dispatch_event() when a 0x11 event arrives.

@@ -100,14 +100,29 @@ void FastModbusProtocol::Execute()
         }
     }
 
-    // ---- 5. Fallback cyclic RTU poll for non-FMB devices ----
+    // ---- 5. Fallback cyclic RTU poll ----
+    // Three cases:
+    //   A. FMB globally disabled → full RTU poll for all devices.
+    //   B. FMB enabled, device probe not done yet → full RTU poll until FMB confirmed.
+    //   C. FMB enabled, device confirmed non-FMB → full RTU poll.
+    //   D. FMB enabled, device confirmed FMB-capable → RTU poll only for prio=DISABLED channels.
     auto since_fb = std::chrono::duration_cast<std::chrono::milliseconds>(
                         now - m_last_fallback).count();
     if (static_cast<uint32_t>(since_fb) >= static_cast<uint32_t>(FallbackPollPeriodMs)) {
         for (auto* mod : m_modules) {
             if (!mod->isConnect() || !mod->isExecute()) continue;
-            if (!EnableFastModbus || !mod->supports_fast_modbus)
+
+            if (!EnableFastModbus) {
+                // Case A: FMB globally off — pure RTU mode
                 fallback_poll(mod);
+            } else if (!mod->fmb_probe_done || !mod->fmb_capable) {
+                // Cases B/C: unknown or confirmed non-FMB → full RTU poll
+                fallback_poll(mod);
+            } else {
+                // Case D: confirmed FMB device — only poll prio=DISABLED channels
+                if (mod->has_disabled_channels())
+                    fallback_poll_disabled_channels(mod);
+            }
         }
         m_last_fallback = clock::now();
     }
@@ -155,12 +170,15 @@ void FastModbusProtocol::scan_bus()
         FmbScanItem item;
         if (!fmb::parse_scan_response(resp, static_cast<size_t>(got), item)) break;
 
-        // Associate discovered device with a configured module
+        // Associate discovered device with a configured module.
+        // Responding to 0x03 proves Fast Modbus capability → skip 0x18 probe failures.
         for (auto* mod : m_modules) {
             if (mod->serial_number == item.serial
                 || (mod->modbus_addr == item.modbus_addr && mod->serial_number == 0)) {
                 mod->serial_number        = item.serial;
                 mod->supports_fast_modbus = true;
+                mod->fmb_capable          = true;   // scan response is capability proof
+                mod->fmb_probe_done       = true;
                 break;
             }
         }
@@ -182,14 +200,43 @@ void FastModbusProtocol::scan_bus()
 
 void FastModbusProtocol::sync_device_priorities(FastModbusDeviceModule* mod)
 {
+    // Guard: if probe done and device is not FMB-capable, nothing to do
+    if (mod->fmb_probe_done && !mod->fmb_capable) return;
+
     for (auto* ch : mod->channels_all) {
         if (ch->prio_synced) continue;
 
-        if (send_event_config(mod, ch)) {
+        if (!ch->is_event_enabled()) {
+            // prio=DISABLED: no 0x18 needed; channel will be read via fallback RTU poll
             ch->prio_synced = true;
+            continue;
         }
-        // If ACK failed, prio_synced stays false → retry next Execute() cycle
+
+        if (send_event_config(mod, ch)) {
+            ch->prio_synced  = true;
+            mod->fmb_capable     = true;   // device responded to FC=0x46 → it's FMB-capable
+            mod->fmb_probe_done  = true;
+            mod->prio_fail_count = 0;      // reset on success
+        } else {
+            ++mod->prio_fail_count;
+            if (!mod->fmb_capable && mod->prio_fail_count >= 3) {
+                // 3 consecutive failures and no successful ACK yet:
+                // treat as non-FMB (generic Modbus RTU) device.
+                mod->fmb_probe_done = true;
+                mod->fmb_capable    = false;
+                // Stop sending 0x18 by marking all channels synced
+                for (auto* c : mod->channels_all) c->prio_synced = true;
+                return;
+            }
+        }
         inter_frame_delay();
+    }
+
+    // All channels attempted without a definitive failure — if we haven't confirmed
+    // FMB capability yet and have no event-enabled channels, mark probe done.
+    if (!mod->fmb_probe_done) {
+        // All non-DISABLED channels either succeeded or failed, but not yet 3 in a row.
+        // Probe stays incomplete → will retry next Execute() cycle.
     }
 }
 
@@ -274,10 +321,14 @@ void FastModbusProtocol::poll_events()
         auto now = clock::now();
         for (const auto& ev : events) {
             if (ev.type == FMB_TYPE_REBOOT) {
-                // Device rebooted: clear all priority sync flags so we resend 0x18
+                // Device rebooted: must resend 0x18 for all channels.
+                // We already know it's FMB-capable (it just sent an event), so
+                // reset probe state but immediately re-confirm capability.
                 for (auto* mod : m_modules) {
                     if (mod->modbus_addr == ev.slave_id) {
-                        mod->reset_prio_sync();
+                        mod->reset_prio_sync();  // clears prio_synced, fmb_capable, fmb_probe_done
+                        mod->fmb_capable    = true;  // re-confirm: we just got a REBOOT event
+                        mod->fmb_probe_done = true;  // no need to re-probe
                         break;
                     }
                 }
@@ -368,6 +419,47 @@ void FastModbusProtocol::fallback_poll(FastModbusDeviceModule* mod)
 
         ch->on_event(raw, now, provider);
         mod->SetFaultState(false, "");
+        inter_frame_delay();
+    }
+}
+
+// ============================================================
+//  fallback_poll_disabled_channels
+//  RTU read only for prio=DISABLED channels on a FMB device.
+//  FMB events cover all other channels; these need a periodic RTU read.
+// ============================================================
+
+void FastModbusProtocol::fallback_poll_disabled_channels(FastModbusDeviceModule* mod)
+{
+    auto* provider = LuaProvider();
+    auto  now      = clock::now();
+
+    for (auto* ch : mod->channels_all) {
+        if (ch->is_event_enabled()) continue; // handled by Fast Modbus events
+
+        uint8_t fc = 0;
+        switch (ch->reg_type) {
+            case FMB_TYPE_COIL:     fc = MB_FC_READ_COILS;   break;
+            case FMB_TYPE_DISCRETE: fc = MB_FC_READ_DISCRETE; break;
+            case FMB_TYPE_HOLDING:  fc = MB_FC_READ_HOLDING;  break;
+            case FMB_TYPE_INPUT:    fc = MB_FC_READ_INPUT;    break;
+            default: continue;
+        }
+
+        auto req = fmb::build_read_regs(mod->modbus_addr, fc, ch->reg_addr, 1);
+        uint8_t resp[32]{};
+        int got = modbus_request(req, resp, sizeof(resp));
+
+        if (got < 5) { inter_frame_delay(); continue; }
+
+        auto vals = fmb::parse_read_response(resp, static_cast<size_t>(got));
+        if (vals.empty()) { inter_frame_delay(); continue; }
+
+        double raw = (ch->reg_type == FMB_TYPE_HOLDING || ch->reg_type == FMB_TYPE_INPUT)
+                   ? static_cast<double>(static_cast<int16_t>(vals[0]))
+                   : static_cast<double>(vals[0]);
+
+        ch->on_event(raw, now, provider);
         inter_frame_delay();
     }
 }

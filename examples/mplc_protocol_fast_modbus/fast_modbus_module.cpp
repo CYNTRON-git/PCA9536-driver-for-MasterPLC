@@ -101,6 +101,9 @@ std::vector<FmbWriteCmd> FastModbusDeviceModule::collect_writes(LuaDataProvider*
 
 bool FastModbusDeviceModule::needs_priority_sync() const
 {
+    // If probe finished and device is not FMB-capable, stop sending 0x18
+    if (fmb_probe_done && !fmb_capable) return false;
+
     for (const auto* ch : channels_all)
         if (!ch->prio_synced) return true;
     return false;
@@ -114,6 +117,17 @@ void FastModbusDeviceModule::mark_priority_synced()
 
 void FastModbusDeviceModule::reset_prio_sync()
 {
+    // Re-sync needed (e.g. after REBOOT event or port reconnect)
+    fmb_probe_done  = false;   // re-run probe in case device changed
+    fmb_capable     = false;
+    prio_fail_count = 0;
     for (auto* ch : channels_all)
         ch->prio_synced = false;
+}
+
+bool FastModbusDeviceModule::has_disabled_channels() const
+{
+    for (const auto* ch : channels_all)
+        if (!ch->is_event_enabled()) return true;
+    return false;
 }

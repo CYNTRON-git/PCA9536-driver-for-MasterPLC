@@ -67,8 +67,13 @@ private:
     // Send a write command (FC05/FC06) to a device.
     void send_write(FastModbusDeviceModule* mod, const FmbWriteCmd& cmd);
 
-    // Cyclic read of all channels for a module (fallback when Fast Modbus not available).
+    // Cyclic RTU read of all channels (used for non-FMB devices, or when FMB is disabled).
     void fallback_poll(FastModbusDeviceModule* mod);
+
+    // Cyclic RTU read of only prio=DISABLED channels on a confirmed FMB device.
+    // Called every FallbackPollPeriodMs for FMB devices that have some channels
+    // explicitly excluded from event reporting.
+    void fallback_poll_disabled_channels(FastModbusDeviceModule* mod);
 
     // Wait t3.5 + InterFrameDelayMs between bus transactions.
     void inter_frame_delay();

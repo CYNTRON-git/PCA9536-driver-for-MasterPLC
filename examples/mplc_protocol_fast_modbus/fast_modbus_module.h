@@ -21,7 +21,16 @@ public:
     uint8_t  modbus_addr{1};              // Modbus RTU address 1..247
     uint32_t serial_number{0};            // Fast Modbus serial (0 = unknown)
     bool     use_serial{false};           // Address by serial instead of MB addr
-    bool     supports_fast_modbus{false}; // Confirmed during scan
+    bool     supports_fast_modbus{false}; // Confirmed during scan (AutoScan)
+
+    // ---- Capability detection state ----
+    // Determined by 0x18 probe in sync_device_priorities().
+    // fmb_capable=true  → device speaks WB Fast Modbus; use event polling.
+    // fmb_capable=false + fmb_probe_done=true → generic Modbus RTU; full fallback poll.
+    // fmb_probe_done=false → probe not yet completed (first Execute() cycles).
+    bool    fmb_capable{false};
+    bool    fmb_probe_done{false};
+    uint8_t prio_fail_count{0};   // consecutive 0x18 failures; triggers probe-done after threshold
 
     // ---- Channel lookup ----
     std::unordered_map<uint32_t, FastModbusRegChannel*> channel_by_reg; // key: fmb_reg_key
@@ -43,9 +52,14 @@ public:
     std::vector<FmbWriteCmd> collect_writes(LuaDataProvider* provider);
 
     // ---- Priority sync helpers ----
+    // Returns true if any channel still needs 0x18 sent.
+    // Returns false if probe completed and device is not FMB-capable (stop trying).
     bool needs_priority_sync() const;
     void mark_priority_synced();         // Mark all channels prio_synced=true
     void reset_prio_sync();              // Mark all channels prio_synced=false (re-sync needed)
+
+    // True if at least one channel has prio=DISABLED (requires cyclic RTU fallback read).
+    bool has_disabled_channels() const;
 
     // ScadaModule interface
     mplc::api::ScadaChannel* Create(const mplc::vm::Channel* channel,
