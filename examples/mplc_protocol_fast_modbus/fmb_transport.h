@@ -38,6 +38,9 @@ public:
     // Inter-frame silence ≥ 3.5 char times at current baud rate
     void wait_t35();
 
+    // Platform-portable sleep (used for InterFrameDelayMs)
+    static void sleep_ms(uint32_t ms);
+
     // CRC-16/MODBUS (poly 0xA001, init 0xFFFF)
     static uint16_t crc16(const uint8_t* data, size_t len);
     static uint16_t crc16(const std::vector<uint8_t>& v) { return crc16(v.data(), v.size()); }

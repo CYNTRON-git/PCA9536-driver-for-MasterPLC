@@ -295,3 +295,17 @@ void FmbTransport::wait_t35()
 }
 
 #endif // _WIN32
+
+// ---- Platform-portable sleep ----
+void FmbTransport::sleep_ms(uint32_t ms)
+{
+    if (ms == 0) return;
+#ifdef _WIN32
+    Sleep(ms);
+#else
+    struct timespec ts;
+    ts.tv_sec  = ms / 1000u;
+    ts.tv_nsec = static_cast<long>(ms % 1000u) * 1000000L;
+    nanosleep(&ts, nullptr);
+#endif
+}

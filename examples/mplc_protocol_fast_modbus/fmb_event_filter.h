@@ -78,17 +78,33 @@ struct FmbEventFilter {
         if (burst_max_events > 0) ++burst_count;
     }
 
-    // If there is a pending value and min_interval has elapsed, pop it.
+    // If there is a pending value and throttle conditions have relaxed, pop it.
     // Returns true and sets out_value if flush should happen.
     bool try_flush_pending(tp now, double& out_value)
     {
         if (!has_pending) return false;
+
+        // Burst window: check if window has expired since it was opened
+        if (burst_window_ms > 0 && burst_max_events > 0) {
+            auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                               now - burst_window_start).count();
+            if (static_cast<uint32_t>(elapsed) >= burst_window_ms) {
+                // Window expired — reset counter, allow flush
+                burst_window_start = now;
+                burst_count = 0;
+            } else if (burst_count >= burst_max_events) {
+                return false; // still throttled within window
+            }
+        }
+
+        // Min-interval: check if enough time has passed since last commit
         if (min_interval_ms > 0) {
             auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
                                now - last_commit_time).count();
             if (static_cast<uint32_t>(elapsed) < min_interval_ms)
                 return false;
         }
+
         out_value   = pending_value;
         has_pending = false;
         return true;

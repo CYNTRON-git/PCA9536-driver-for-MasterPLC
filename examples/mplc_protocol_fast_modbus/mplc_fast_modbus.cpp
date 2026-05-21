@@ -23,6 +23,7 @@ MPLC_DECLARE_PROPERTIES(FastModbusProtocol) {
     MPLC_In(ResponseTimeoutMs),
     MPLC_In(InterFrameDelayMs),
     MPLC_In(EventPollIntervalMs),
+    MPLC_In(FallbackPollPeriodMs),
     MPLC_In(EnableFastModbus),
     MPLC_In(AutoScan),
 };

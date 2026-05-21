@@ -1,6 +1,8 @@
 #include "fast_modbus_module.h"
 #include "fmb_frames.h"
 #include <mplc/vm/node_typese.h>
+#include <cmath>
+#include <algorithm>
 
 // ---- Init: read device-level settings from MS4 project tree ----
 
@@ -31,14 +33,11 @@ mplc::api::ScadaChannel* FastModbusDeviceModule::Create(const mplc::vm::Channel*
                                                           LuaDataProvider* provider)
 {
     auto* ch = new FastModbusRegChannel();
-    // BaseInit sets up InVar/OutVar and calls ch->Init(channel)
     ch->BaseInit(channel, provider);
 
-    // Register channel in lookup table
     uint32_t key = fmb_reg_key(ch->reg_type, ch->reg_addr);
     channel_by_reg[key] = ch;
     channels_all.push_back(ch);
-
     return ch;
 }
 
@@ -55,31 +54,45 @@ void FastModbusDeviceModule::dispatch_event(const FmbEvent& ev, LuaDataProvider*
     it->second->on_event(raw, now, provider);
 }
 
-// ---- Execute per cycle ----
+// ---- Flush pending (anti-spam timer) ----
 
-std::vector<FmbWriteCmd> FastModbusDeviceModule::execute(
-    LuaDataProvider* provider, std::chrono::steady_clock::time_point now)
+void FastModbusDeviceModule::flush_pending_values(LuaDataProvider* provider,
+                                                   std::chrono::steady_clock::time_point now)
+{
+    for (auto* ch : channels_all)
+        ch->flush_pending(now, provider);
+}
+
+// ---- Collect write commands (MS4 → device) ----
+
+std::vector<FmbWriteCmd> FastModbusDeviceModule::collect_writes(LuaDataProvider* provider)
 {
     std::vector<FmbWriteCmd> writes;
+    if (!isWrite()) return writes;
 
     for (auto* ch : channels_all) {
-        // Flush pending (min_interval timer)
-        ch->flush_pending(now, provider);
+        if (!ch->OutVar) continue;
+        if (ch->reg_type != FMB_TYPE_COIL && ch->reg_type != FMB_TYPE_HOLDING)
+            continue; // INPUT / DISCRETE are read-only
 
-        // Collect write commands from OutVar (MS4 → device)
-        if (ch->OutVar) {
-            OpcUa_VariantHlp val;
-            if (OpcUa_IsGood(ch->ReadVariant(provider, val))) {
-                int v = 0;
-                if (OpcUa_IsGood(val.GetInt(v))) {
-                    FmbWriteCmd cmd;
-                    cmd.reg_type = ch->reg_type;
-                    cmd.reg_addr = ch->reg_addr;
-                    cmd.value    = static_cast<uint16_t>(v);
-                    writes.push_back(cmd);
-                }
-            }
-        }
+        OpcUa_VariantHlp val;
+        auto status = ch->ReadVariant(provider, val);
+        if (!OpcUa_IsGood(status)) continue;
+        if (!IsNeedWrite(*ch, val)) continue;
+
+        // Apply inverse scale: raw = (physical - offset) / scale
+        float fv  = val.Get<float>(0.0f);
+        float scl = (std::fabs(ch->scale) > 1e-9f) ? ch->scale : 1.0f;
+        float raw_f = (fv - ch->offset) / scl;
+
+        // Clamp to uint16 range
+        raw_f = std::max(0.0f, std::min(65535.0f, std::roundf(raw_f)));
+
+        FmbWriteCmd cmd;
+        cmd.reg_type = ch->reg_type;
+        cmd.reg_addr = ch->reg_addr;
+        cmd.value    = static_cast<uint16_t>(raw_f);
+        writes.push_back(cmd);
     }
     return writes;
 }
@@ -88,9 +101,8 @@ std::vector<FmbWriteCmd> FastModbusDeviceModule::execute(
 
 bool FastModbusDeviceModule::needs_priority_sync() const
 {
-    for (auto* ch : channels_all) {
+    for (const auto* ch : channels_all)
         if (!ch->prio_synced) return true;
-    }
     return false;
 }
 
@@ -98,4 +110,10 @@ void FastModbusDeviceModule::mark_priority_synced()
 {
     for (auto* ch : channels_all)
         ch->prio_synced = true;
+}
+
+void FastModbusDeviceModule::reset_prio_sync()
+{
+    for (auto* ch : channels_all)
+        ch->prio_synced = false;
 }

@@ -1,7 +1,7 @@
 #include "fast_modbus_protocol.h"
 #include <mplc/vm/node_typese.h>
 #include <cstring>
-#include <algorithm>
+#include <string>
 
 // ============================================================
 //  Init — called once after all modules/channels are created
@@ -9,7 +9,6 @@
 
 void FastModbusProtocol::Init()
 {
-    // Open serial port
     bool ok = m_transport.open(PortName,
                                static_cast<int>(BaudRate),
                                static_cast<int>(Parity),
@@ -17,85 +16,101 @@ void FastModbusProtocol::Init()
                                static_cast<int>(DataBits),
                                static_cast<int>(ResponseTimeoutMs));
     SetFaultState(!ok, ok ? "" : "Cannot open serial port: " + PortName);
-
     if (!ok) return;
-    m_initialized = true;
 
-    // Optionally scan bus to detect serial numbers
-    if (AutoScan) {
+    m_initialized       = true;
+    m_confirm_slave     = 0;
+    m_confirm_flag      = 0;
+    m_last_event_poll   = clock::now();
+    m_last_fallback     = clock::now();
+
+    if (AutoScan)
         scan_bus();
-    }
 
-    // Send initial priority config to all devices
-    sync_priorities();
+    // Initial priority config for all devices
+    if (EnableFastModbus) {
+        for (auto* mod : m_modules)
+            sync_device_priorities(mod);
+    }
 }
 
 // ============================================================
-//  Execute — called every TaskPeriod() ms
+//  Execute — called every TaskPeriod() ms by the runtime
 // ============================================================
 
 void FastModbusProtocol::Execute()
 {
+    // Re-open port if lost (e.g. USB disconnect)
     if (!m_initialized || !m_transport.is_open()) {
-        // Attempt re-open if port was lost
-        bool ok = m_transport.open(PortName, BaudRate, Parity, StopBits, DataBits,
-                                   ResponseTimeoutMs);
+        bool ok = m_transport.open(PortName,
+                                   static_cast<int>(BaudRate),
+                                   static_cast<int>(Parity),
+                                   static_cast<int>(StopBits),
+                                   static_cast<int>(DataBits),
+                                   static_cast<int>(ResponseTimeoutMs));
         if (!ok) {
             SetFaultState(true, "Serial port not available: " + PortName);
+            for (auto* mod : m_modules)
+                mod->SetFaultState(true, "No serial port");
             return;
         }
-        m_initialized = true;
-        sync_priorities();
-    }
-
-    auto now = clock::now();
-    auto* provider = LuaProvider();
-
-    // Re-send priority config for any channel not yet synced (e.g., after reboot event)
-    auto since_prio = std::chrono::duration_cast<std::chrono::seconds>(
-                          now - m_last_prio_sync).count();
-    if (since_prio >= 30) {
-        for (auto* mod : m_modules) {
-            if (mod->needs_priority_sync()) {
-                sync_priorities();
-                break;
-            }
-        }
-    }
-
-    // Event poll cycle
-    auto since_poll = std::chrono::duration_cast<std::chrono::milliseconds>(
-                          now - m_last_event_poll).count();
-    if (EnableFastModbus && static_cast<uint32_t>(since_poll) >= static_cast<uint32_t>(EventPollIntervalMs)) {
-        poll_events();
-        m_last_event_poll = clock::now();
-    }
-
-    // Handle writes from MS4 and flush pending values for all modules
-    now = clock::now();
-    for (auto* mod : m_modules) {
-        if (!mod->isExecute()) continue;
-
-        auto writes = mod->execute(provider, now);
-        for (auto& cmd : writes) {
-            uint8_t addr = mod->modbus_addr;
-            std::vector<uint8_t> req;
-            uint8_t resp[32]{};
-
-            if (cmd.reg_type == FMB_TYPE_COIL) {
-                req = fmb::build_write_coil(addr, cmd.reg_addr, cmd.value != 0);
-            } else if (cmd.reg_type == FMB_TYPE_HOLDING) {
-                req = fmb::build_write_reg(addr, cmd.reg_addr, cmd.value);
-            } else {
-                continue; // INPUT/DISCRETE are read-only
-            }
-
-            modbus_request(req, resp, sizeof(resp));
-            m_transport.wait_t35();
-        }
+        m_initialized   = true;
+        m_confirm_slave = 0;
+        m_confirm_flag  = 0;
+        // All priorities need re-sync after reconnect
+        for (auto* mod : m_modules)
+            mod->reset_prio_sync();
     }
 
     SetFaultState(false, "");
+    auto* provider = LuaProvider();
+    auto  now      = clock::now();
+
+    // ---- 1. Flush pending values (anti-spam min_interval timer) ----
+    for (auto* mod : m_modules)
+        mod->flush_pending_values(provider, now);
+
+    // ---- 2. Send writes from MS4 → device (only changed values) ----
+    for (auto* mod : m_modules) {
+        if (!mod->isConnect() || !mod->isExecute()) continue;
+
+        auto writes = mod->collect_writes(provider);
+        for (const auto& cmd : writes) {
+            send_write(mod, cmd);
+            inter_frame_delay();
+        }
+    }
+
+    // ---- 3. Priority sync: immediate, per-device, as needed ----
+    if (EnableFastModbus) {
+        for (auto* mod : m_modules) {
+            if (!mod->isConnect()) continue;
+            if (mod->needs_priority_sync())
+                sync_device_priorities(mod);
+        }
+    }
+
+    // ---- 4. Fast Modbus event poll ----
+    if (EnableFastModbus) {
+        auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                      now - m_last_event_poll).count();
+        if (static_cast<uint32_t>(ms) >= static_cast<uint32_t>(EventPollIntervalMs)) {
+            poll_events();
+            m_last_event_poll = clock::now();
+        }
+    }
+
+    // ---- 5. Fallback cyclic RTU poll for non-FMB devices ----
+    auto since_fb = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        now - m_last_fallback).count();
+    if (static_cast<uint32_t>(since_fb) >= static_cast<uint32_t>(FallbackPollPeriodMs)) {
+        for (auto* mod : m_modules) {
+            if (!mod->isConnect() || !mod->isExecute()) continue;
+            if (!EnableFastModbus || !mod->supports_fast_modbus)
+                fallback_poll(mod);
+        }
+        m_last_fallback = clock::now();
+    }
 }
 
 // ============================================================
@@ -111,69 +126,71 @@ mplc::api::ScadaModule* FastModbusProtocol::Create(const mplc::vm::IOModule* mod
 }
 
 // ============================================================
-//  scan_bus — send 0x01/0x02 to discover devices
+//  scan_bus — 0x01/0x02 to discover device serial numbers
 // ============================================================
 
 void FastModbusProtocol::scan_bus()
 {
     if (!m_transport.is_open()) return;
 
-    // Flush any stale bytes
     m_transport.flush_rx();
 
-    // Phase 1: broadcast scan start
-    auto req = fmb::build_scan_start(0x00);
-    m_transport.send(req);
+    // Scan cycle: 0x04 (reset) → 0x01 (start) → [0x03 + 0x02] × N → 0x04 (end)
+    // Reference: MR-02m-flasher modbus_rtu.py + MR-02m fast_mb.c
+    // All scan frames are exactly 5 bytes: FD 46 [sub] CRC_L CRC_H.
+    // Slave arbitration is internal; master sends simple 5-byte 0x02 each time.
 
-    uint8_t resp[FMB_SCAN_FRAME_LEN + 4]{};
-    uint32_t last_serial = 0;
-    bool first = true;
+    // Reset any stale scan state on all slaves
+    m_transport.send(fmb::build_scan_end());
+    inter_frame_delay();
 
-    // Arbitration loop: up to 247 devices
+    if (!m_transport.send(fmb::build_scan_start())) return;
+
     for (int attempt = 0; attempt < 247; ++attempt) {
+        uint8_t resp[FMB_SCAN_FRAME_LEN + 4]{};
         int got = m_transport.recv(resp, sizeof(resp),
                                    static_cast<uint32_t>(ResponseTimeoutMs));
-        if (got < static_cast<int>(FMB_SCAN_FRAME_LEN)) break; // no more devices
+        if (got < static_cast<int>(FMB_SCAN_FRAME_LEN)) break; // timeout = no more devices
 
         FmbScanItem item;
         if (!fmb::parse_scan_response(resp, static_cast<size_t>(got), item)) break;
 
-        // Match serial to a module
+        // Associate discovered device with a configured module
         for (auto* mod : m_modules) {
             if (mod->serial_number == item.serial
                 || (mod->modbus_addr == item.modbus_addr && mod->serial_number == 0)) {
-                mod->serial_number      = item.serial;
+                mod->serial_number        = item.serial;
                 mod->supports_fast_modbus = true;
                 break;
             }
         }
 
-        last_serial = item.serial;
-        first = false;
-
-        // Send scan-next to continue arbitration
-        m_transport.wait_t35();
-        req = fmb::build_scan_next(last_serial, 0x00);
-        m_transport.send(req);
+        // Prompt next unscanned slave (5-byte frame, no serial field)
+        inter_frame_delay();
+        if (!m_transport.send(fmb::build_scan_next())) break;
     }
 
+    // Close scan cycle — important: resets i_am_not_scaned on all slaves
+    m_transport.send(fmb::build_scan_end());
+    inter_frame_delay();
     m_last_scan = clock::now();
-    (void)first;
 }
 
 // ============================================================
-//  sync_priorities — send 0x18 to each channel with prio != DISABLED
+//  sync_device_priorities — send 0x18 for channels needing sync
 // ============================================================
 
-void FastModbusProtocol::sync_priorities()
+void FastModbusProtocol::sync_device_priorities(FastModbusDeviceModule* mod)
 {
-    for (auto* mod : m_modules) {
-        for (auto* ch : mod->channels_all) {
-            if (!send_event_config(mod, ch)) break; // bus error, stop for now
+    for (auto* ch : mod->channels_all) {
+        if (ch->prio_synced) continue;
+
+        if (send_event_config(mod, ch)) {
+            ch->prio_synced = true;
         }
-        mod->mark_priority_synced();
+        // If ACK failed, prio_synced stays false → retry next Execute() cycle
+        inter_frame_delay();
     }
-    m_last_prio_sync = clock::now();
 }
 
 bool FastModbusProtocol::send_event_config(FastModbusDeviceModule* mod,
@@ -182,84 +199,181 @@ bool FastModbusProtocol::send_event_config(FastModbusDeviceModule* mod,
     auto req = fmb::build_event_config(mod->modbus_addr,
                                         ch->reg_type,
                                         ch->reg_addr,
-                                        1,        // count = 1 register
+                                        1,        // count = 1 register (uint8_t)
                                         ch->prio);
     uint8_t resp[16]{};
     int got = modbus_request(req, resp, sizeof(resp));
-    m_transport.wait_t35();
-    // ACK is [slave] 46 18 [crc L] [crc H] — 5 bytes
-    return (got >= 5)
-           && resp[1] == FMB_FUNC
-           && resp[2] == FMB_SUB_EVT_CONFIG
+
+    // ACK: [slave] 46 18 01 00 CRC_L CRC_H — 7 bytes
+    // data_len=0x01, status=0x00 (OK)
+    return (got >= 7)
+           && (resp[0] == mod->modbus_addr)
+           && (resp[1] == FMB_FUNC)
+           && (resp[2] == FMB_SUB_EVT_CONFIG)
+           && (resp[3] == 0x01)   // data_len
+           && (resp[4] == 0x00)   // status OK
            && FmbTransport::check_crc(resp, static_cast<size_t>(got));
 }
 
 // ============================================================
-//  poll_events — one event request/response cycle
+//  poll_events — loop until bus quiet (0x12) or timeout
 // ============================================================
 
 void FastModbusProtocol::poll_events()
 {
     auto* provider = LuaProvider();
-    auto now       = clock::now();
 
-    // Build event request (confirm last slave's event packet if we have one)
-    auto req = fmb::build_event_request(0x01,      // min_slave_id: start from 1
-                                         0xFF,      // max_data_len: accept any size
-                                         m_confirm_slave,
-                                         m_confirm_flag);
-    m_transport.flush_rx();
-    if (!m_transport.send(req)) return;
+    // Safety limit: avoid hogging the bus if device keeps sending events
+    const int max_polls = 64;
 
-    uint8_t resp[256]{};
-    int got = m_transport.recv(resp, sizeof(resp),
-                               static_cast<uint32_t>(ResponseTimeoutMs));
-    if (got < 5) {
-        // Timeout or garbage — clear confirm to start fresh
-        m_confirm_slave = 0;
-        m_confirm_flag  = 0;
-        return;
-    }
-
-    std::vector<FmbEvent> events;
-    uint8_t new_confirm_slave = 0;
-    uint8_t new_confirm_flag  = 0;
-
-    int rc = fmb::parse_event_response(resp, static_cast<size_t>(got),
-                                        events, new_confirm_slave, new_confirm_flag);
-    if (rc < 0) {
-        // Bad frame
-        m_confirm_slave = 0;
-        m_confirm_flag  = 0;
-        return;
-    }
-
-    // Update confirm state for next poll
-    m_confirm_slave = new_confirm_slave;
-    m_confirm_flag  = new_confirm_flag;
-
-    if (rc == 0) return; // FMB_SUB_EVT_NONE — bus quiet
-
-    // Dispatch events to matching modules/channels
-    for (auto& ev : events) {
-        for (auto* mod : m_modules) {
-            if (mod->modbus_addr != ev.slave_id) continue;
-
-            // Handle REBOOT event: schedule priority re-sync for this device
-            if (ev.type == FMB_TYPE_REBOOT) {
-                mod->mark_priority_synced(); // reset so it syncs next cycle
-                for (auto* ch : mod->channels_all) ch->prio_synced = false;
-                break;
-            }
-
-            mod->dispatch_event(ev, provider, now);
+    for (int i = 0; i < max_polls; ++i) {
+        // Build request with pending confirmation from previous iteration
+        auto req = fmb::build_event_request(0x01,           // min_slave_id
+                                             0xFF,           // max_data_len: accept any
+                                             m_confirm_slave,
+                                             m_confirm_flag);
+        m_transport.flush_rx();
+        if (!m_transport.send(req)) {
+            m_confirm_slave = 0;
+            m_confirm_flag  = 0;
             break;
         }
+
+        uint8_t resp[256]{};
+        int got = m_transport.recv(resp, sizeof(resp),
+                                   static_cast<uint32_t>(ResponseTimeoutMs));
+        if (got < 5) {
+            // Timeout — bus is quiet, confirm state reset
+            m_confirm_slave = 0;
+            m_confirm_flag  = 0;
+            break;
+        }
+
+        std::vector<FmbEvent> events;
+        uint8_t cs = 0, cf = 0;
+        int rc = fmb::parse_event_response(resp, static_cast<size_t>(got), events, cs, cf);
+
+        if (rc < 0) {
+            // Bad frame (CRC error, wrong subcommand)
+            m_confirm_slave = 0;
+            m_confirm_flag  = 0;
+            break;
+        }
+
+        if (rc == 0) {
+            // FMB_SUB_EVT_NONE — bus quiet, done
+            m_confirm_slave = 0;
+            m_confirm_flag  = 0;
+            break;
+        }
+
+        // rc == 1: received 0x11 event packet
+        m_confirm_slave = cs;
+        m_confirm_flag  = cf;
+
+        auto now = clock::now();
+        for (const auto& ev : events) {
+            if (ev.type == FMB_TYPE_REBOOT) {
+                // Device rebooted: clear all priority sync flags so we resend 0x18
+                for (auto* mod : m_modules) {
+                    if (mod->modbus_addr == ev.slave_id) {
+                        mod->reset_prio_sync();
+                        break;
+                    }
+                }
+                continue;
+            }
+
+            // Dispatch to matching module
+            for (auto* mod : m_modules) {
+                if (mod->modbus_addr == ev.slave_id) {
+                    mod->dispatch_event(ev, provider, now);
+                    break;
+                }
+            }
+        }
+
+        inter_frame_delay();
     }
 }
 
 // ============================================================
-//  modbus_request — send frame + receive response
+//  send_write — FC05 (coil) or FC06 (register) write
+// ============================================================
+
+void FastModbusProtocol::send_write(FastModbusDeviceModule* mod, const FmbWriteCmd& cmd)
+{
+    std::vector<uint8_t> req;
+
+    if (cmd.reg_type == FMB_TYPE_COIL) {
+        req = fmb::build_write_coil(mod->modbus_addr, cmd.reg_addr, cmd.value != 0);
+    } else if (cmd.reg_type == FMB_TYPE_HOLDING) {
+        req = fmb::build_write_reg(mod->modbus_addr, cmd.reg_addr, cmd.value);
+    } else {
+        return; // INPUT / DISCRETE are read-only
+    }
+
+    uint8_t resp[16]{};
+    int got = modbus_request(req, resp, sizeof(resp));
+
+    // Echo response for FC05/FC06: [addr][fc][reg H][reg L][val H][val L][crc] = 8 bytes
+    bool ok = (got >= 8)
+              && (resp[0] == mod->modbus_addr)
+              && FmbTransport::check_crc(resp, static_cast<size_t>(got));
+    mod->SetFaultState(!ok, ok ? "" : "Write failed addr=" + std::to_string(mod->modbus_addr));
+}
+
+// ============================================================
+//  fallback_poll — cyclic read for non-FMB devices
+// ============================================================
+
+void FastModbusProtocol::fallback_poll(FastModbusDeviceModule* mod)
+{
+    auto* provider = LuaProvider();
+    auto  now      = clock::now();
+
+    for (auto* ch : mod->channels_all) {
+        uint8_t fc = 0;
+        switch (ch->reg_type) {
+            case FMB_TYPE_COIL:     fc = MB_FC_READ_COILS;   break;
+            case FMB_TYPE_DISCRETE: fc = MB_FC_READ_DISCRETE; break;
+            case FMB_TYPE_HOLDING:  fc = MB_FC_READ_HOLDING;  break;
+            case FMB_TYPE_INPUT:    fc = MB_FC_READ_INPUT;    break;
+            default: continue;
+        }
+
+        auto req = fmb::build_read_regs(mod->modbus_addr, fc, ch->reg_addr, 1);
+        uint8_t resp[32]{};
+        int got = modbus_request(req, resp, sizeof(resp));
+
+        if (got < 5) {
+            mod->SetFaultState(true, "No response addr=" + std::to_string(mod->modbus_addr));
+            inter_frame_delay();
+            continue;
+        }
+
+        auto vals = fmb::parse_read_response(resp, static_cast<size_t>(got));
+        if (vals.empty()) {
+            inter_frame_delay();
+            continue;
+        }
+
+        // For holding/input registers: interpret raw uint16 as signed int16 (same as events)
+        double raw = 0.0;
+        if (ch->reg_type == FMB_TYPE_HOLDING || ch->reg_type == FMB_TYPE_INPUT) {
+            raw = static_cast<double>(static_cast<int16_t>(vals[0]));
+        } else {
+            raw = static_cast<double>(vals[0]); // coil/discrete: 0 or 1
+        }
+
+        ch->on_event(raw, now, provider);
+        mod->SetFaultState(false, "");
+        inter_frame_delay();
+    }
+}
+
+// ============================================================
+//  modbus_request — flush + send + receive
 // ============================================================
 
 int FastModbusProtocol::modbus_request(const std::vector<uint8_t>& req,
@@ -267,41 +381,17 @@ int FastModbusProtocol::modbus_request(const std::vector<uint8_t>& req,
 {
     m_transport.flush_rx();
     if (!m_transport.send(req)) return -1;
-    int got = m_transport.recv(resp_buf, resp_max,
-                               static_cast<uint32_t>(ResponseTimeoutMs));
-    return got;
+    return m_transport.recv(resp_buf, resp_max,
+                            static_cast<uint32_t>(ResponseTimeoutMs));
 }
 
 // ============================================================
-//  fallback_poll — cyclic read when Fast Modbus not available
+//  inter_frame_delay — t3.5 + optional extra delay
 // ============================================================
 
-void FastModbusProtocol::fallback_poll(FastModbusDeviceModule* mod)
+void FastModbusProtocol::inter_frame_delay()
 {
-    auto* provider = LuaProvider();
-    auto now       = clock::now();
-
-    // Group channels by reg_type and read contiguous blocks
-    // For simplicity: read each channel individually (optimization possible later)
-    for (auto* ch : mod->channels_all) {
-        uint8_t fc = 0;
-        switch (ch->reg_type) {
-            case FMB_TYPE_COIL:     fc = MB_FC_READ_COILS;    break;
-            case FMB_TYPE_DISCRETE: fc = MB_FC_READ_DISCRETE;  break;
-            case FMB_TYPE_HOLDING:  fc = MB_FC_READ_HOLDING;   break;
-            case FMB_TYPE_INPUT:    fc = MB_FC_READ_INPUT;     break;
-            default: continue;
-        }
-
-        auto req = fmb::build_read_regs(mod->modbus_addr, fc, ch->reg_addr, 1);
-        uint8_t resp[32]{};
-        int got = modbus_request(req, resp, sizeof(resp));
-        m_transport.wait_t35();
-
-        if (got < 5) continue;
-        auto vals = fmb::parse_read_response(resp, static_cast<size_t>(got));
-        if (vals.empty()) continue;
-
-        ch->on_event(static_cast<double>(vals[0]), now, provider);
-    }
+    m_transport.wait_t35();
+    if (InterFrameDelayMs > 0)
+        FmbTransport::sleep_ms(static_cast<uint32_t>(InterFrameDelayMs));
 }
