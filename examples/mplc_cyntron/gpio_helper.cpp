@@ -1,81 +1,50 @@
 #include "gpio_helper.h"
-#include <memory>
-#include "core/includes.h"
-#ifndef _WIN32
-#include <linux/gpio.h>
-#include <sys/ioctl.h>
+#include <cerrno>
+#include <cstring>
 #include <fcntl.h>
+#include <linux/gpio.h>
+#include <stdexcept>
+#include <system_error>
+#include <sys/ioctl.h>
 #include <unistd.h>
-#include <stdio.h>
-#endif  // ! _WIN32
 
-namespace mplc { namespace cyntron {
-    constexpr const char* GPIO_PATH = "/dev/gpiochip0";
-    constexpr int GPIO_LINE = 268;
-#ifdef _WIN32
-    struct USBResetHelper::internal {};
-    void USBResetHelper::On() {}
-    void USBResetHelper::Off() {}
-    USBResetHelper::USBResetHelper() {}
-#else
-    struct USBResetHelper::internal {
-        int chip_fd = -1;
-        int line_fd = -1;
-        ~internal() {
-            if (chip_fd >= 0)
-                close(chip_fd);
-            if (line_fd >= 0)
-                close(line_fd);
-        }
-    };
-    USBResetHelper::USBResetHelper(): gpio_data(new internal{open(GPIO_PATH, O_RDWR), -1}) {
-        if (!gpio_data || gpio_data->chip_fd < 0) {
-            PRINTLN("Could not open %s", GPIO_PATH);
-            return;
-        }
-        struct gpiohandle_request req;
-        req.lineoffsets[0] = GPIO_LINE;
+namespace mplc::cyntron {
+namespace {
+int gpioIoctl(int fd, unsigned long op, void* data) {
+    int rc;
+    do { rc = ioctl(fd, op, data); } while (rc < 0 && errno == EINTR);
+    return rc;
+}
+}
+USBResetHelper::~USBResetHelper() {
+    if (line_fd >= 0) close(line_fd);
+}
+void USBResetHelper::set(bool enabled) {
+    if (line_fd < 0) {
+        int chip;
+        do { chip = open("/dev/gpiochip0", O_RDONLY | O_CLOEXEC); } while (chip < 0 && errno == EINTR);
+        if (chip < 0) throw std::system_error(errno, std::generic_category(), "Open USB GPIO");
+        gpiohandle_request req{};
+        req.lineoffsets[0] = 268;
         req.lines = 1;
         req.flags = GPIOHANDLE_REQUEST_OUTPUT;
-        memcpy(req.consumer_label, "mplc", sizeof("mplc"));
-        if (ioctl(gpio_data->chip_fd, GPIO_GET_LINEHANDLE_IOCTL, &req) < 0) {
-            PRINTLN("Could not set line to output");
-            return;
+        req.default_values[0] = enabled;
+        std::strcpy(req.consumer_label, "mplc");
+        int rc = gpioIoctl(chip, GPIO_GET_LINEHANDLE_IOCTL, &req);
+        int err = errno;
+        close(chip);
+        if (rc < 0) throw std::system_error(err, std::generic_category(), "Request USB GPIO 268");
+        line_fd = req.fd;
+    } else if (level != enabled) {
+        gpiohandle_data data{};
+        data.values[0] = enabled;
+        if (gpioIoctl(line_fd, GPIOHANDLE_SET_LINE_VALUES_IOCTL, &data) < 0) {
+            int err = errno;
+            close(line_fd);
+            line_fd = -1;
+            throw std::system_error(err, std::generic_category(), "Set USB GPIO 268");
         }
-        gpio_data->line_fd = req.fd;
     }
-    void USBResetHelper::On() {
-        if (on) {
-            return;
-        }
-        if (!gpio_data || !gpio_data->line_fd || !gpio_data->chip_fd) {
-            throw std::runtime_error("не удалось открыть gpio линию");
-        }
-        struct gpiohandle_data data;
-        data.values[0] = 1;
-        if (ioctl(gpio_data->line_fd, GPIOHANDLE_SET_LINE_VALUES_IOCTL, &data) < 0) {
-            throw std::runtime_error("не удалось отправить данные через gpio");
-        }
-        on = true;
-    }
-
-    void USBResetHelper::Off() {
-        if (!on) {
-            return;
-        }
-        if (!gpio_data || !gpio_data->line_fd || !gpio_data->chip_fd) {
-            throw std::runtime_error("не удалось открыть gpio линию");
-        }
-        struct gpiohandle_data data;
-        data.values[0] = 0;
-        if (ioctl(gpio_data->line_fd, GPIOHANDLE_SET_LINE_VALUES_IOCTL, &data) < 0) {
-            throw std::runtime_error("не удалось отправить данные через gpio");
-        }
-        on = false;
-    }
-#endif  // _WIN32
-
-    void USBResetHelper::internal_deleter::operator()(USBResetHelper::internal* ptr) {
-        delete ptr;
-    }
-}}  // namespace mplc::cyntron
+    level = enabled;
+}
+}

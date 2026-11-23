@@ -89,14 +89,15 @@ public:
     }
 
     void open() {
-        lock_fd_ = ::open(kLockFile, O_RDWR | O_CREAT | O_CLOEXEC, 0666);
+        do { lock_fd_ = ::open(kLockFile, O_RDWR | O_CREAT | O_CLOEXEC, 0666); }
+        while (lock_fd_ < 0 && errno == EINTR);
         if (lock_fd_ < 0) {
             throw std::runtime_error(format_errno("Не удалось открыть lock-файл PCA9536"));
         }
 
         const auto started = std::chrono::steady_clock::now();
         while (flock(lock_fd_, LOCK_EX | LOCK_NB) < 0) {
-            if (errno != EWOULDBLOCK && errno != EAGAIN) {
+            if (errno != EINTR && errno != EWOULDBLOCK && errno != EAGAIN) {
                 throw std::runtime_error(format_errno("Не удалось заблокировать шину PCA9536"));
             }
             if (std::chrono::steady_clock::now() - started >= kLockWait) {
@@ -106,7 +107,7 @@ public:
             std::this_thread::sleep_for(kLockStep);
         }
 
-        fd_ = ::open(kI2cPath, O_RDWR | O_CLOEXEC);
+        do { fd_ = ::open(kI2cPath, O_RDWR | O_CLOEXEC); } while (fd_ < 0 && errno == EINTR);
         if (fd_ < 0) {
             throw std::runtime_error(format_errno("Не удалось открыть /dev/i2c-2"));
         }
@@ -120,7 +121,9 @@ public:
         ioctl(fd_, I2C_RETRIES, retries);
 #endif
 
-        if (ioctl(fd_, I2C_SLAVE, kI2cAddress) < 0) {
+        int selected;
+        do { selected = ioctl(fd_, I2C_SLAVE, kI2cAddress); } while (selected < 0 && errno == EINTR);
+        if (selected < 0) {
             throw std::runtime_error(format_errno("Не удалось выбрать устройство PCA9536"));
         }
     }
@@ -161,6 +164,7 @@ private:
         do {
             rc = ::write(fd_, data, size);
         } while (rc < 0 && errno == EINTR);
+        if (rc >= 0 && static_cast<size_t>(rc) != size) errno = EIO;
         return rc;
     }
 
@@ -169,6 +173,7 @@ private:
         do {
             rc = ::read(fd_, data, size);
         } while (rc < 0 && errno == EINTR);
+        if (rc >= 0 && static_cast<size_t>(rc) != size) errno = EIO;
         return rc;
     }
 
@@ -182,6 +187,7 @@ public:
         Pca9536Session session;
         session.open();
         session.ensureConfigured();
+        if ((session.readRegister(kOutputRegister) & 0x0F) == (mask & 0x0F)) return;
         session.writeRegister(kOutputRegister, static_cast<uint8_t>(mask & 0x0F));
         const uint8_t verify = session.readRegister(kOutputRegister);
         if ((verify & 0x0F) != (mask & 0x0F)) {

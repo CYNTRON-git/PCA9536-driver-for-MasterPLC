@@ -1,18 +1,15 @@
 #pragma once
-#include <memory>
-namespace mplc { namespace cyntron {
 
+namespace mplc::cyntron {
 class USBResetHelper {
 public:
-    USBResetHelper();
-    void On();
-    void Off();
-    struct internal;
-    struct internal_deleter {
-        void operator()(internal*);
-    };
-    private:
-    bool on = true;
-    std::unique_ptr<internal, internal_deleter> gpio_data;
+    USBResetHelper() = default;
+    ~USBResetHelper();
+    USBResetHelper(const USBResetHelper&) = delete;
+    USBResetHelper& operator=(const USBResetHelper&) = delete;
+    void set(bool enabled);
+private:
+    int line_fd = -1;
+    bool level = false;
 };
-}}  // namespace mplc::cyntron
+}

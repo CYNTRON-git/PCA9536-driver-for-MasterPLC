@@ -1,7 +1,8 @@
 .SECONDEXPANSION:
 ROOT=../../..
 OBJDIR=.obj
-MODULES=$(notdir $(wildcard $(ROOT)/examples/*))
+# The new-API system addin uses build-sa02m.sh; common contains headers only.
+MODULES=$(filter-out common mplc_cyntron,$(notdir $(wildcard $(ROOT)/examples/*)))
 CXXFLAGS += -Wno-narrowing -fpermissive -O2 -fPIC -D_DEFAULT_SOURCE
 LDFLAGS  += -shared -fPIC -lm -ldl -lrt -lpthread -Wl,-rpath,./ -Wl,-rpath-link,$(MPLCLIBS)
 CXX ?=	g++

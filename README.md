@@ -1,5 +1,12 @@
 # PCA9536 Driver for MasterPLC / MasterSCADA 4D
 
+## Системный драйвер СА-02м для нового API
+
+Исходники `examples/mplc_cyntron` регистрируют `CyntronProtocol` (17 входов, UPTIME в сутках) и `CA_02m` (5 выходов BOOL). Контракт сохранён в [docs/channel-contract.json](docs/channel-contract.json). Сборка на Mac mini выполняется командой `./build-sa02m.sh /абсолютный/путь/к/новой/сборке` с SDK 1.3.10.35699 и MPS GCC 13.3.0. Библиотека появится в `work/API/platform/linux/api/mplc_cyntron.so`, протокол ABI в `work/result.json`. Для теста с имитаторами устройств используйте `bash tests/run-linux-io.sh` в Linux с GCC 11 или новее.
+
+## Исходные примеры для прежнего SDK
+
+
 Драйвер для сервера автоматизации СА-02м, работающий в среде MasterPLC (MasterSCADA 4D) и управляющий модулем расширения на базе I2C GPIO-экспандера `PCA9536` по адресу `0x41`.
 
 Репозиторий содержит:
