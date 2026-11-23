@@ -77,7 +77,7 @@ int __wrap_ioctl(int fd, unsigned long op, ...) {
         assert(op == I2C_RDWR);
         auto* request = va_arg(args, i2c_rdwr_ioctl_data*);
         va_end(args);
-        assert(request->nmsgs == (rtc_address == 0x68 ? 4u : 2u));
+        assert(request->nmsgs == 2); // Four messages return spurious zeroes on the A40i.
         for (unsigned i = 0; i < request->nmsgs; i += 2) {
             auto command = request->msgs[i], data = request->msgs[i+1];
             assert(command.addr == rtc_address && command.flags == 0 && command.len == 1);
@@ -146,7 +146,7 @@ int main() {
     };
     auto external = readExternalRtc(sys);
     assert(external.tm_year == 126 && external.tm_mon == 10 && external.tm_mday == 23);
-    assert(external.tm_hour == 10 && external.tm_min == 15 && external.tm_sec == 30 && rtc_reads == 1);
+    assert(external.tm_hour == 10 && external.tm_min == 15 && external.tm_sec == 30 && rtc_reads == 2);
     rtc_status = 0x80; unavailable(); rtc_status = 0;
     rtc_data[5] = 2; rtc_data[4] = 0x29; unavailable();
     rtc_data[6] = 0x24; assert(readExternalRtc(sys).tm_mday == 29);

@@ -46,22 +46,25 @@ int bcd(unsigned byte) {
     return 10 * int(byte >> 4) + int(byte & 15);
 }
 
+bool readRegisters(int fd, __u16 address, __u8 reg, __u8* data, __u16 length) {
+    i2c_msg messages[] = {{address, 0, 1, &reg}, {address, I2C_M_RD, length, data}};
+    i2c_rdwr_ioctl_data transfer{messages, 2};
+    return readIoctl(fd, I2C_RDWR, &transfer) == 2;
+}
+
 std::optional<rtc_time> calendar(int fd, unsigned addr, bool ds3231) {
     // I2C_SLAVE refuses an address bound to a kernel driver. Never force access.
     int selected;
     do { selected = ioctl(fd, I2C_SLAVE, static_cast<unsigned long>(addr)); }
     while (selected < 0 && errno == EINTR);
     if (selected < 0) return {};
-    __u8 statusReg = 0x0f, status = 0, clockReg = ds3231 ? 0x00 : 0x02, data[7]{};
+    __u8 status = 0, data[7]{};
     const auto address = static_cast<__u16>(addr);
-    i2c_msg messages[] = {
-        {address, 0, 1, &statusReg}, {address, I2C_M_RD, 1, &status},
-        {address, 0, 1, &clockReg}, {address, I2C_M_RD, sizeof(data), data}
-    };
-    i2c_rdwr_ioctl_data transfer{messages + (ds3231 ? 0 : 2), ds3231 ? 4u : 2u};
-    // Write messages select register pointers only. Read the calendar in one coherent burst.
-    if (readIoctl(fd, I2C_RDWR, &transfer) != int(transfer.nmsgs) ||
-        (ds3231 ? (status & 0x80) : (data[0] & 0x80))) return {}; // oscillator stop / low-voltage flag
+    // The A40i adapter returns zero bytes with a successful rc on a four-message
+    // transfer. Use two transactions; all seven calendar fields still come from one burst.
+    if (ds3231 && (!readRegisters(fd, address, 0x0f, &status, 1) || (status & 0x80))) return {};
+    if (!readRegisters(fd, address, ds3231 ? 0x00 : 0x02, data, sizeof(data)) ||
+        (!ds3231 && (data[0] & 0x80))) return {}; // PCF8563 low-voltage flag
     rtc_time t{};
     t.tm_sec = bcd(data[0] & 0x7f);
     t.tm_min = bcd(data[1] & 0x7f);
