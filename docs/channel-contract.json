@@ -1,0 +1,316 @@
+[
+  {
+    "protocol": "CyntronProtocol",
+    "channels": [
+      {
+        "name": "CPU_TEMP",
+        "ports": [
+          {
+            "id": 48220,
+            "defid": 10.0,
+            "type": "SYSTEM_INT_PARAM",
+            "hasType": [
+              "SYSTEM_INT_PARAM"
+            ]
+          }
+        ],
+        "comment": "Температура CPU"
+      },
+      {
+        "name": "CPU_LOAD",
+        "ports": [
+          {
+            "id": 48226,
+            "defid": 10.0,
+            "type": "SYSTEM_INT_PARAM",
+            "hasType": [
+              "SYSTEM_INT_PARAM"
+            ]
+          }
+        ],
+        "comment": "Загрузка CPU"
+      },
+      {
+        "name": "RAM_PERCENT",
+        "ports": [
+          {
+            "id": 48232,
+            "defid": 10.0,
+            "type": "SYSTEM_INT_PARAM",
+            "hasType": [
+              "SYSTEM_INT_PARAM"
+            ]
+          }
+        ],
+        "comment": "Загрузка DDR"
+      },
+      {
+        "name": "DISK_PERCENT",
+        "ports": [
+          {
+            "id": 48238,
+            "defid": 10.0,
+            "type": "SYSTEM_INT_PARAM",
+            "hasType": [
+              "SYSTEM_INT_PARAM"
+            ]
+          }
+        ],
+        "comment": "Занято места на eMMC"
+      },
+      {
+        "name": "UPTIME",
+        "ports": [
+          {
+            "id": 48244,
+            "defid": 10.0,
+            "type": "SYSTEM_REAL_PARAM",
+            "hasType": [
+              "SYSTEM_REAL_PARAM"
+            ]
+          }
+        ],
+        "comment": "Время работы"
+      },
+      {
+        "name": "SYS_TIME",
+        "ports": [
+          {
+            "id": 48250,
+            "defid": 10.0,
+            "type": "DT",
+            "hasType": []
+          }
+        ],
+        "comment": "Системное время"
+      },
+      {
+        "name": "RTC_TIME",
+        "ports": [
+          {
+            "id": 48256,
+            "defid": 10.0,
+            "type": "DT",
+            "hasType": []
+          }
+        ],
+        "comment": "Часы реального времени"
+      },
+      {
+        "name": "MODEM_STATUS",
+        "ports": [
+          {
+            "id": 48262,
+            "defid": 10.0,
+            "type": "SYSTEM_STRING_PARAM",
+            "hasType": [
+              "SYSTEM_STRING_PARAM"
+            ]
+          }
+        ],
+        "comment": "Статус USB модема"
+      },
+      {
+        "name": "MODEM_IFACE",
+        "ports": [
+          {
+            "id": 48268,
+            "defid": 10.0,
+            "type": "SYSTEM_STRING_PARAM",
+            "hasType": [
+              "SYSTEM_STRING_PARAM"
+            ]
+          }
+        ],
+        "comment": "Интерфейс USB модема"
+      },
+      {
+        "name": "USB_FLASH_DEV",
+        "ports": [
+          {
+            "id": 48274,
+            "defid": 10.0,
+            "type": "SYSTEM_BOOL_PARAM",
+            "hasType": [
+              "SYSTEM_BOOL_PARAM"
+            ]
+          }
+        ],
+        "comment": "Монтирование USB накопителя"
+      },
+      {
+        "name": "USB_FLASH_SIZE",
+        "ports": [
+          {
+            "id": 48280,
+            "defid": 10.0,
+            "type": "SYSTEM_REAL_PARAM",
+            "hasType": [
+              "SYSTEM_REAL_PARAM"
+            ]
+          }
+        ],
+        "comment": "Размер USB накопителя"
+      },
+      {
+        "name": "USB_FLASH_USED",
+        "ports": [
+          {
+            "id": 48286,
+            "defid": 10.0,
+            "type": "SYSTEM_REAL_PARAM",
+            "hasType": [
+              "SYSTEM_REAL_PARAM"
+            ]
+          }
+        ],
+        "comment": "Использовано памяти в Гб"
+      },
+      {
+        "name": "USB_FLASH_PERC",
+        "ports": [
+          {
+            "id": 48292,
+            "defid": 10.0,
+            "type": "SYSTEM_INT_PARAM",
+            "hasType": [
+              "SYSTEM_INT_PARAM"
+            ]
+          }
+        ],
+        "comment": "Использовано памяти в %"
+      },
+      {
+        "name": "SD_CARD_DEV",
+        "ports": [
+          {
+            "id": 48298,
+            "defid": 10.0,
+            "type": "SYSTEM_BOOL_PARAM",
+            "hasType": [
+              "SYSTEM_BOOL_PARAM"
+            ]
+          }
+        ],
+        "comment": "Монтирование SD накопителя"
+      },
+      {
+        "name": "SD_CARD_SIZE",
+        "ports": [
+          {
+            "id": 48304,
+            "defid": 10.0,
+            "type": "SYSTEM_REAL_PARAM",
+            "hasType": [
+              "SYSTEM_REAL_PARAM"
+            ]
+          }
+        ],
+        "comment": "Размер uSD накопителя"
+      },
+      {
+        "name": "SD_CARD_USED",
+        "ports": [
+          {
+            "id": 48310,
+            "defid": 10.0,
+            "type": "SYSTEM_REAL_PARAM",
+            "hasType": [
+              "SYSTEM_REAL_PARAM"
+            ]
+          }
+        ],
+        "comment": "Использовано памяти в Гб"
+      },
+      {
+        "name": "SD_CARD_PERC",
+        "ports": [
+          {
+            "id": 48316,
+            "defid": 10.0,
+            "type": "SYSTEM_INT_PARAM",
+            "hasType": [
+              "SYSTEM_INT_PARAM"
+            ]
+          }
+        ],
+        "comment": "Использовано памяти в %"
+      }
+    ]
+  },
+  {
+    "protocol": "CA_02m",
+    "channels": [
+      {
+        "name": "RED_LED",
+        "ports": [
+          {
+            "id": 61106,
+            "defid": 11.0,
+            "type": "BOOL",
+            "hasType": [
+              "SYSTEM_BOOL_PARAM"
+            ]
+          }
+        ],
+        "comment": ""
+      },
+      {
+        "name": "BUZZER",
+        "ports": [
+          {
+            "id": 61112,
+            "defid": 11.0,
+            "type": "BOOL",
+            "hasType": [
+              "SYSTEM_BOOL_PARAM"
+            ]
+          }
+        ],
+        "comment": ""
+      },
+      {
+        "name": "BLUE_LED",
+        "ports": [
+          {
+            "id": 61118,
+            "defid": 11.0,
+            "type": "BOOL",
+            "hasType": [
+              "SYSTEM_BOOL_PARAM"
+            ]
+          }
+        ],
+        "comment": ""
+      },
+      {
+        "name": "USB_POWER",
+        "ports": [
+          {
+            "id": 61124,
+            "defid": 11.0,
+            "type": "BOOL",
+            "hasType": [
+              "SYSTEM_BOOL_PARAM"
+            ]
+          }
+        ],
+        "comment": ""
+      },
+      {
+        "name": "DOUT",
+        "ports": [
+          {
+            "id": 61130,
+            "defid": 11.0,
+            "type": "BOOL",
+            "hasType": [
+              "SYSTEM_BOOL_PARAM"
+            ]
+          }
+        ],
+        "comment": ""
+      }
+    ]
+  }
+]
