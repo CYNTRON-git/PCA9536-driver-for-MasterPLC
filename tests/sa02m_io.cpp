@@ -18,6 +18,12 @@ uint8_t selected = 0, registers[4] = {0, 15, 0, 15};
 int level = -1;
 bool reject_address = false, rtc_missing = true;
 int rtc_fd = -1;
+int rtc_bus = -1, rtc_address = 0, rtc_reads = 0, rtc_node_reads = 0;
+bool rtc0_only = false;
+int rtc0_opens = 0;
+bool rtc_bus_busy = false;
+uint8_t rtc_status = 0;
+std::array<uint8_t,7> rtc_data{0x30,0x15,0x10,0x02,0x23,0x11,0x26};
 std::string root, lockfile;
 }
 extern "C" {
@@ -26,10 +32,12 @@ int __real_close(int);
 ssize_t __real_read(int, void*, size_t);
 ssize_t __real_write(int, const void*, size_t);
 int __wrap_open(const char* path, int flags, ...) {
-    if (!strcmp(path, "/dev/rtc0")) {
-        if (rtc_missing) { errno = ENOENT; return -1; }
+    if (!strcmp(path, "/dev/rtc0") || !strcmp(path, "/dev/rtc1")) {
+        if (!strcmp(path, "/dev/rtc0")) ++rtc0_opens;
+        if (rtc_missing || (rtc0_only && !strcmp(path, "/dev/rtc1"))) { errno = ENOENT; return -1; }
         return rtc_fd = __real_open("/dev/null", O_RDWR);
     }
+    if (!strcmp(path, "/dev/i2c-1")) return rtc_bus = __real_open("/dev/null", flags);
     if (!strcmp(path, kI2cPath)) {
         ++bus_opens;
         return bus = __real_open("/dev/null", O_RDWR);
@@ -49,6 +57,7 @@ int __wrap_close(int fd) {
     if (fd == chip) chip = -1;
     if (fd == line) line = -1;
     if (fd == rtc_fd) rtc_fd = -1;
+    if (fd == rtc_bus) rtc_bus = -1;
     return __real_close(fd);
 }
 int __wrap_ioctl(int fd, unsigned long op, ...) {
@@ -58,7 +67,31 @@ int __wrap_ioctl(int fd, unsigned long op, ...) {
     }
     va_list args;
     va_start(args, op);
+    if (fd == rtc_bus) {
+        if (op == I2C_SLAVE) {
+            rtc_address = int(va_arg(args, unsigned long));
+            va_end(args);
+            if (rtc_bus_busy) { errno = EBUSY; return -1; }
+            return 0;
+        }
+        assert(op == I2C_RDWR);
+        auto* request = va_arg(args, i2c_rdwr_ioctl_data*);
+        va_end(args);
+        assert(request->nmsgs == (rtc_address == 0x68 ? 4u : 2u));
+        for (unsigned i = 0; i < request->nmsgs; i += 2) {
+            auto command = request->msgs[i], data = request->msgs[i+1];
+            assert(command.addr == rtc_address && command.flags == 0 && command.len == 1);
+            assert(data.addr == rtc_address && data.flags == I2C_M_RD);
+            if (data.len == 1) { assert(command.buf[0] == 0x0f); data.buf[0] = rtc_status; }
+            else {
+                assert(data.len == rtc_data.size() && command.buf[0] == (rtc_address == 0x68 ? 0x00 : 0x02));
+                std::copy(rtc_data.begin(), rtc_data.end(), data.buf);
+            }
+        }
+        ++rtc_reads; return int(request->nmsgs);
+    }
     if (fd == rtc_fd && op == RTC_RD_TIME) {
+        ++rtc_node_reads;
         auto rtc = va_arg(args, rtc_time*);
         rtc->tm_year = 126; rtc->tm_mon = 10; rtc->tm_mday = 23;
     } else if (fd == chip && op == GPIO_GET_LINEHANDLE_IOCTL) {
@@ -98,6 +131,43 @@ int main() {
     assert(mkdtemp(tmp));
     root = tmp;
     lockfile = root + "/lock";
+    // .136 has an internal rtc0 and an unbound DS3231 I2C client. No rtc1 exists.
+    namespace fs = std::filesystem;
+    fs::path sys(root);
+    fs::create_directories(sys / "class/rtc");
+    fs::create_directories(sys / "devices/platform/soc/1c20400.rtc/rtc/rtc0");
+    fs::create_directory_symlink(sys / "devices/platform/soc/1c20400.rtc/rtc/rtc0", sys / "class/rtc/rtc0");
+    fs::path ds = sys / "bus/i2c/devices/1-0068", pcf = sys / "bus/i2c/devices/1-0051";
+    fs::create_directories(ds);
+    std::ofstream(ds / "name") << "ds3231,d1307\n";
+    auto unavailable = [&] {
+        try { readExternalRtc(sys); assert(false); } catch(const std::runtime_error&) {}
+        assert(rtc_bus == -1);
+    };
+    auto external = readExternalRtc(sys);
+    assert(external.tm_year == 126 && external.tm_mon == 10 && external.tm_mday == 23);
+    assert(external.tm_hour == 10 && external.tm_min == 15 && external.tm_sec == 30 && rtc_reads == 1);
+    rtc_status = 0x80; unavailable(); rtc_status = 0;
+    rtc_data[5] = 2; rtc_data[4] = 0x29; unavailable();
+    rtc_data[6] = 0x24; assert(readExternalRtc(sys).tm_mday == 29);
+    rtc_data[2] = 0x72; assert(readExternalRtc(sys).tm_hour == 12);
+    rtc_data[1] = 0x5a; unavailable(); rtc_data[1] = 0x15;
+    rtc_bus_busy = true; unavailable(); rtc_bus_busy = false;
+    fs::remove_all(ds);
+    fs::create_directories(pcf);
+    std::ofstream(pcf / "name") << "pcf8563\n";
+    rtc_data = {0x30,0x15,0x10,0x23,0x01,0x11,0x26};
+    assert(readExternalRtc(sys).tm_mday == 23);
+    rtc_data[0] |= 0x80; unavailable();
+    fs::remove_all(pcf); unavailable();
+    assert(rtc0_opens == 0);  // The known Allwinner SoC node must never supply RTC_TIME.
+    rtc_missing = false; rtc0_only = true;
+    fs::remove(sys / "class/rtc/rtc0");
+    fs::create_directories(sys / "devices/i2c-1/1-0068/rtc/rtc0");
+    fs::create_directory_symlink(sys / "devices/i2c-1/1-0068/rtc/rtc0", sys / "class/rtc/rtc0");
+    assert(readExternalRtc(sys).tm_year == 126 && rtc0_opens == 1); // External on /dev/rtc0 on an older image.
+    rtc_missing = true; rtc0_only = false;
+    puts("PASS: .136 internal rtc0 excluded, unbound DS3231 and PCF8563 burst reads, read-only register pointers, OSF/VL, invalid BCD/calendar, kernel ownership, external rtc0 compatibility");
     for (int bits = 0; bits < 16; ++bits)
         assert(build_output_mask(bits & 8, bits & 1, bits & 4, bits & 2) == (15 ^ bits));
     assert(applyOverride(15, "value=1\nexpires_at=101\n", 100) == 11);
@@ -162,8 +232,15 @@ int main() {
     diagnostic.Execute();
     assert(diagnostic.fault && rtc->InVar.quality == OpcUa_BadCommunicationError);
     rtc_missing = false;
+    int reads_before = rtc_node_reads;
+    diagnostic.Execute();
+    assert(diagnostic.fault && rtc_node_reads == reads_before);
+    std::this_thread::sleep_for(std::chrono::milliseconds(1010));
     diagnostic.Execute();
     assert(!diagnostic.fault && rtc->InVar.quality == 0);
+    int reads_after = rtc_node_reads;
+    diagnostic.Execute();
+    assert(!diagnostic.fault && rtc_node_reads == reads_after);
     rtc->InVar.Get<mplc::DateTime>();
     auto check = [&diagnostic](const char* name, auto expectedType) {
         mplc::vm::Channel def{name};

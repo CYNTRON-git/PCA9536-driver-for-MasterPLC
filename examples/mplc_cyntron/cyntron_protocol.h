@@ -2,6 +2,7 @@
 #include <mplc/api.h>
 #include <share/scada_types.h>
 #include "core/main.h"
+#include "external_rtc.h"
 namespace mplc { namespace cyntron {
     class CyntronProtocol final : public api::ScadaProtocol {
     public:
@@ -23,6 +24,7 @@ namespace mplc { namespace cyntron {
             }
         };
         std::unique_ptr<CpuLoadState, CpuLoadStateDeleter> cpu_load_state;
+        ExternalRtc external_rtc;
         std::unordered_map<std::string, api::ScadaChannel*> chan;
     };
 }} // namespace mplc::cyntron

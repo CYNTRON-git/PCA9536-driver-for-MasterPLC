@@ -7,15 +7,8 @@ inline mplc::DateTime get_sys_time() {
     if (gettimeofday(&tv, nullptr) < 0) throw std::runtime_error("Cannot read system clock");
     return mplc::DateTime::from_unix(tv.tv_sec);
 }
-inline mplc::DateTime get_rtc_time() {
-    rtc_time rtc{};
-    int fd;
-    do { fd = open("/dev/rtc0", O_RDONLY | O_CLOEXEC); } while (fd < 0 && errno == EINTR);
-    if (fd < 0) throw std::runtime_error("Cannot open /dev/rtc0");
-    int rc;
-    do { rc = ioctl(fd, RTC_RD_TIME, &rtc); } while (rc < 0 && errno == EINTR);
-    close(fd);
-    if (rc < 0) throw std::runtime_error("Cannot read /dev/rtc0");
+inline mplc::DateTime get_rtc_time(ExternalRtc& source) {
+    const rtc_time rtc = source.read();
     return mplc::DateTime(1900 + rtc.tm_year, rtc.tm_mon + 1, rtc.tm_mday,
                           rtc.tm_hour, rtc.tm_min, rtc.tm_sec);
 }
@@ -55,7 +48,7 @@ inline mplc::DateTime get_rtc_time() {
                 if (name == "SYS_TIME")
                     ch->InVar.Update(get_sys_time());
                 if (name == "RTC_TIME")
-                    ch->InVar.Update(get_rtc_time());
+                    ch->InVar.Update(get_rtc_time(external_rtc));
                 if (name == "MODEM_STATUS")
                     ch->InVar.Update(get_modem_status(rsi));
                 if (name == "MODEM_IFACE")
